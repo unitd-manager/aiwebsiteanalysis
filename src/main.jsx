@@ -196,6 +196,50 @@ function SiteDetail({ id, onBack, onChanged }) {
   );
 }
 
+// Opens the page scrolled to the link text and highlighted (Chrome / Edge "text fragment" links).
+// With a heading, it highlights from the heading down to the link, so the right "Read more" is found.
+function findOnPageUrl(pageUrl, text, location) {
+  if (!text || text.startsWith('(')) return null;
+  const short = (s) => (s.length > 80 ? s.slice(0, 80).replace(/\s+\S*$/, '') : s);
+  const enc = (s) => encodeURIComponent(short(s)).replace(/-/g, '%2D').replace(/,/g, '%2C');
+  const heading = location?.match(/^Under the heading "(.*)"$/)?.[1];
+  return `${pageUrl.split('#')[0]}#:~:text=${heading ? `${enc(heading)},` : ''}${enc(text)}`;
+}
+
+// The page an issue was found on, a "Find on page" link, and the other pages that have it.
+function PageCell({ issue }) {
+  const [copied, setCopied] = useState(false);
+  // Highlighting doesn't work on every site, so also copy the link text for Ctrl+F.
+  const copyText = () => {
+    navigator.clipboard?.writeText(issue.link_text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 8000); }).catch(() => {});
+  };
+  let pages = [];
+  try { pages = issue.found_on ? JSON.parse(issue.found_on) : []; } catch { /* older scans */ }
+  if (!pages.length) pages = [issue.page_url];
+  const path = (u) => { try { return new URL(u).pathname; } catch { return u; } };
+  const row = (u) => {
+    const find = findOnPageUrl(u, issue.link_text, issue.location);
+    return (
+      <div key={u} className="page-row">
+        <a href={u} target="_blank" rel="noreferrer">{path(u)}</a>
+        {find && <a className="find-link" href={find} target="_blank" rel="noreferrer" onClick={copyText} title="Opens the page and highlights the link (Chrome / Edge). The link text is also copied: press Ctrl+F, then Ctrl+V on the page.">Find on page ↗</a>}
+      </div>
+    );
+  };
+  return (
+    <>
+      {row(pages[0])}
+      {copied && <div className="notice small">Copied “{issue.link_text}”. On the page press <b>Ctrl+F</b>, then <b>Ctrl+V</b>.</div>}
+      {pages.length > 1 && (
+        <details className="more-pages">
+          <summary>+ {pages.length - 1} more page{pages.length > 2 ? 's' : ''}</summary>
+          {pages.slice(1).map(row)}
+        </details>
+      )}
+    </>
+  );
+}
+
 // Issues from the latest scan, with Fixed / Ignore. NEW = not seen in the previous scan.
 function IssueTable({ siteId, issues, onChanged }) {
   const [filter, setFilter] = useState('open');
@@ -231,8 +275,9 @@ function IssueTable({ siteId, issues, onChanged }) {
               <td>{ISSUE_LABELS[i.type] || i.type}</td>
               <td>{i.detail}{i.evidence && (/^https?:\/\//.test(i.evidence)
                 ? <div className="evidence"><a href={i.evidence} target="_blank" rel="noreferrer">{i.evidence}</a></div>
-                : <div className="evidence">{i.evidence}</div>)}</td>
-              <td><a href={i.page_url} target="_blank" rel="noreferrer">{new URL(i.page_url).pathname}</a></td>
+                : <div className="evidence">{i.evidence}</div>)}
+                {(i.link_text || i.location) && <div className="where small">{i.link_text && <>Link text: <b>“{i.link_text}”</b></>}{i.link_text && i.location && ' · '}{i.location}</div>}</td>
+              <td><PageCell issue={i} /></td>
               <td className="row-actions">
                 {i.status
                   ? <button className="small" disabled={busyId === i.id} onClick={() => mark(i, 'open')}>Reopen</button>

@@ -10,6 +10,10 @@ const clean = (s) => String(s ?? '')
 const day = (d) => (d ? new Date(d).toISOString().slice(0, 10) : '-');
 const stamp = (d) => new Date(d).toISOString().slice(0, 16).replace('T', ' ');
 const daysLeft = (d) => (d ? Math.ceil((new Date(d) - Date.now()) / 86_400_000) : null);
+/** "Link text: \"Read more\" · In the footer" for broken links; empty for other issues. */
+export const whereText = (i) => [i.link_text && `Link text: "${i.link_text}"`, i.location].filter(Boolean).join(' · ');
+export const morePages = (i) => { try { return Math.max(0, JSON.parse(i.found_on || '[]').length - 1); } catch { return 0; } };
+
 const SEV = { high: '#b91c1c', medium: '#b45309', low: '#0369a1' };
 
 /** Fetches the brand logo (PNG or JPEG only, which is what PDFs support). Never throws. */
@@ -130,7 +134,8 @@ export function renderReportPdf(r, logo = null) {
       doc.moveDown(0.5);
       table(
         [{ title: 'Severity', width: 0.13, color: (v) => SEV[v] || '#111827' }, { title: 'Problem', width: 0.52 }, { title: 'Page', width: 0.35 }],
-        r.issues.map((i) => [i.severity, i.evidence ? `${i.detail}\n${i.evidence}` : i.detail, String(i.page_url || '').replace(/^https?:\/\/[^/]+/, '') || '/'])
+        r.issues.map((i) => [i.severity, [i.detail, i.evidence, whereText(i)].filter(Boolean).join('\n'),
+          (String(i.page_url || '').replace(/^https?:\/\/[^/]+/, '') || '/') + (morePages(i) ? `\n(and ${morePages(i)} more pages)` : '')])
       );
     }
   }

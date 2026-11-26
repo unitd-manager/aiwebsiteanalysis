@@ -10,7 +10,7 @@
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
 import { pool, toSql } from './db.js';
 import { USER_AGENT, readCapped, describeFetchError, isCertError, lenientGet } from './checks/uptime.js';
-import { pageText, pageTitle, extractLinks, extractImages, isDevHost, isPageLink, findErrorMessages, expiredEventDates, staleCopyright } from './pages.js';
+import { pageText, pageTitle, extractLinks, extractLinkDetails, extractImages, isDevHost, isPageLink, findErrorMessages, expiredEventDates, staleCopyright } from './pages.js';
 import { createChatModel, isAiEnabled, textOf } from './ai.js';
 import { raiseAlert } from './notify.js';
 import { classifyIssues, loadIssueMemory, setIssueStatus } from './issues.js';
@@ -72,7 +72,7 @@ async function crawl(state) {
       }
       const links = extractLinks(p.html, p.finalUrl);
       const { images, emptyTags } = extractImages(p.html, p.finalUrl);
-      pages.push({ url: p.finalUrl, title: pageTitle(p.html), text: pageText(p.html), links, images, emptyTags });
+      pages.push({ url: p.finalUrl, title: pageTitle(p.html), text: pageText(p.html), links, linkInfo: extractLinkDetails(p.html, p.finalUrl), images, emptyTags });
       for (const link of links) {
         const u = new URL(link);
         if (u.hostname.replace(/^www\./, '') !== host || !isPageLink(link) || /^\/(_next|wp-json|wp-admin|cdn-cgi)\//.test(u.pathname)) continue;
@@ -114,7 +114,8 @@ async function checkLinks(state) {
   const whereUsed = new Map();
   for (const page of state.pages) for (const link of page.links) {
     if (crawled.has(link)) continue;
-    if (!whereUsed.has(link)) whereUsed.set(link, page.url);
+    if (!whereUsed.has(link)) whereUsed.set(link, []);
+    whereUsed.get(link).push(page);
   }
   const links = [...whereUsed.keys()].slice(0, 600);
   const issues = [];
@@ -135,7 +136,11 @@ async function checkLinks(state) {
           type: 'broken_link',
           // External sites that just time out often block bots; flag them for a manual look, not as broken.
           severity: timedOut && !internal ? 'low' : (r.status === 404 || r.status === 410 || r.status === 0 ? 'high' : 'medium'),
-          page_url: whereUsed.get(link),
+          page_url: whereUsed.get(link)[0].url,
+          // Every page that has this link, plus its text and place on the page, so people can find it.
+          found_on: whereUsed.get(link).map((p) => p.url),
+          link_text: whereUsed.get(link)[0].linkInfo?.[link]?.text || null,
+          location: whereUsed.get(link)[0].linkInfo?.[link]?.where || null,
           detail: timedOut && !internal ? 'Link did not respond in 15s (site may block bots, check manually)' : `Broken link (${r.status ? `HTTP ${r.status}` : r.error})`,
           evidence: link
         });
@@ -294,10 +299,11 @@ export function dedupeIssues(issues) {
     const fp = (i.evidence || i.detail).toLowerCase().replace(/\W+/g, '').slice(0, 60);
     const key = i.type === 'page_error' ? `${i.page_url}|${fp}` : `${i.type === 'broken_link' || i.type === 'broken_image' ? i.type : 'content'}|${fp}`;
     const existing = byKey.get(key);
-    if (existing) existing.pages += 1;
-    else byKey.set(key, { ...i, pages: 1 });
+    const pages = i.found_on || [i.page_url];
+    if (existing) { for (const p of pages) if (!existing.found_on.includes(p)) existing.found_on.push(p); }
+    else byKey.set(key, { ...i, found_on: [...new Set(pages)] });
   }
-  return [...byKey.values()].map(({ pages, ...i }) => (pages > 1 ? { ...i, detail: `${i.detail} (on ${pages} pages)` } : i));
+  return [...byKey.values()].map((i) => (i.found_on.length > 1 ? { ...i, detail: `${i.detail} (on ${i.found_on.length} pages)` } : i));
 }
 
 function summarize(state) {
@@ -338,8 +344,9 @@ export async function runSiteScan(site) {
     const memory = await loadIssueMemory(site.id);
     const { issues, reopened } = classifyIssues(dedupeIssues(result.issues), memory.prevFingerprints, memory.statuses);
     for (const i of issues) {
-      await pool.query('INSERT INTO scan_issues (scan_id, site_id, type, severity, page_url, detail, evidence, fingerprint, is_new) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [scanId, site.id, i.type, i.severity, i.page_url.slice(0, 1000), i.detail, i.evidence?.slice(0, 1000) || null, i.fingerprint, i.is_new]);
+      await pool.query('INSERT INTO scan_issues (scan_id, site_id, type, severity, page_url, detail, evidence, fingerprint, is_new, link_text, location, found_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [scanId, site.id, i.type, i.severity, i.page_url.slice(0, 1000), i.detail, i.evidence?.slice(0, 1000) || null, i.fingerprint, i.is_new,
+          i.link_text?.slice(0, 300) || null, i.location?.slice(0, 300) || null, i.found_on?.length > 1 ? JSON.stringify(i.found_on.slice(0, 200)) : null]);
     }
     // "Fixed" issues that are still there come back as open.
     for (const fp of reopened) await setIssueStatus(site.id, fp, 'open');
@@ -353,7 +360,7 @@ export async function runSiteScan(site) {
     if (fresh.length) {
       const order = { high: 0, medium: 1, low: 2 };
       const top = [...fresh].sort((a, b) => order[a.severity] - order[b.severity]).slice(0, 10);
-      const lines = top.map((i) => `• [${i.severity}]${i.reopened ? ' (came back)' : ''} ${i.detail}\n  ${i.page_url}${i.evidence && (i.type === 'broken_link' || i.type === 'broken_image') ? `\n  → ${i.evidence}` : ''}`);
+      const lines = top.map((i) => `• [${i.severity}]${i.reopened ? ' (came back)' : ''} ${i.detail}\n  ${i.page_url}${i.evidence && (i.type === 'broken_link' || i.type === 'broken_image') ? `\n  → ${i.evidence}` : ''}${i.link_text ? `\n  Link text: "${i.link_text}"${i.location ? ` (${i.location})` : ''}` : ''}`);
       const known = open.length - fresh.length;
       await raiseAlert(site, {
         kind: 'scan', dedupeKey: `scan:${scanId}`, includeClient: false,

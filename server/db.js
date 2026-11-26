@@ -134,7 +134,7 @@ export async function initializeDatabase() {
   }
   await removeOrphans();
   await addColumns('scans', { progress: 'VARCHAR(200) NULL' });
-  await addColumns('scan_issues', { fingerprint: 'VARCHAR(191) NULL', is_new: 'TINYINT(1) NOT NULL DEFAULT 0' });
+  await addColumns('scan_issues', { fingerprint: 'VARCHAR(191) NULL', is_new: 'TINYINT(1) NOT NULL DEFAULT 0', link_text: 'VARCHAR(300) NULL', location: 'VARCHAR(300) NULL', found_on: 'TEXT NULL' });
   await addColumns('sites', {
     backup_token: 'VARCHAR(64) NULL',
     backup_expected_hours: 'INT NULL',

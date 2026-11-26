@@ -31,6 +31,15 @@ crawl ─► checkLinks ─► checkImages ─► ruleChecks ─► aiReview ─
 - The same issue in a shared header or footer is reported once, as "on N pages".
 - The dashboard shows live progress while a scan runs.
 
+### Finding a broken link on the page
+
+Each broken link shows:
+- its **link text** (for example "Read The Whitepaper"),
+- **where it sits**: in the menu, header or footer, or under which heading,
+- **every page** that has it ("+ N more pages").
+
+**Find on page ↗** opens the page and highlights the link (Chrome and Edge). Some sites, such as Next.js sites, drop the highlight after loading, so the link text is also copied: press **Ctrl+F**, then **Ctrl+V** on the page. Links inside images, icons or the page code have no visible text; use the heading shown, or right-click the page → **Inspect** and search for the broken address.
+
 ### Fixed / Ignore
 
 Every issue has **✓ Fixed** and **Ignore** buttons.

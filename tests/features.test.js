@@ -113,3 +113,36 @@ test('monthly report renders as a multi-page PDF, even with emoji and long issue
   assert.equal(reportFileName(site, '2026-10'), 'example.com-2026-10-health-report.pdf');
   setSettingsCacheForTests({});
 });
+
+test('broken links record their text, where they sit, and every page they are on', async () => {
+  const { extractLinkDetails } = await import('../server/pages.js');
+  const { dedupeIssues } = await import('../server/scanAgent.js');
+  const html = `<header><nav><a href="/about">About&nbsp;us</a></nav></header>
+    <main><h2>Latest <b>news</b></h2><p>Intro</p><a href="https://admin.example.com/newsroom/award/">Read more</a>
+    <a href="/pic"><img src="x.png" alt="Award photo"></a><a href="/icon"><i class="fa"></i></a></main>
+    <div class="site-footer"><a href="/privacy#top">Privacy</a></div><script src="/app.js"></script>`;
+  const d = extractLinkDetails(html, 'https://www.example.com/page');
+  assert.deepEqual(d['https://www.example.com/about'], { text: 'About us', where: 'In the menu' });
+  assert.deepEqual(d['https://admin.example.com/newsroom/award/'], { text: 'Read more', where: 'Under the heading "Latest news"' });
+  assert.equal(d['https://www.example.com/pic'].text, '(image: Award photo)');
+  assert.equal(d['https://www.example.com/icon'].text, '(icon or empty link)');
+  assert.deepEqual(d['https://www.example.com/privacy'], { text: 'Privacy', where: 'In the footer' });
+  assert.equal(d['https://www.example.com/app.js'].where, 'Page code (not visible on the page)');
+
+  const d2 = extractLinkDetails('<div class="card-header"><a href="/a">A</a></div><div class="x site-header"><a href="/b">B</a></div><main><a href="/m">M</a></main><div id="footer"><a href="/c">C</a></div>', 'https://e.com/');
+  assert.equal(d2['https://e.com/a'].where, 'In the page body', '"card-header" is not the site header');
+  assert.equal(d2['https://e.com/b'].where, 'In the header');
+  assert.equal(d2['https://e.com/m'].where, 'In the page body');
+  assert.equal(d2['https://e.com/c'].where, 'In the footer');
+
+  const merged = dedupeIssues([
+    { type: 'broken_image', severity: 'high', page_url: 'https://e.com/a', detail: 'Image missing', evidence: 'https://e.com/x.png' },
+    { type: 'broken_image', severity: 'high', page_url: 'https://e.com/b', detail: 'Image missing', evidence: 'https://e.com/x.png' },
+    { type: 'broken_link', severity: 'high', page_url: 'https://e.com/a', found_on: ['https://e.com/a', 'https://e.com/c'], detail: 'Broken link (HTTP 404)', evidence: 'https://e.com/gone', link_text: 'Gone' }
+  ]);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged[0].found_on, ['https://e.com/a', 'https://e.com/b']);
+  assert.equal(merged[0].detail, 'Image missing (on 2 pages)');
+  assert.equal(merged[1].detail, 'Broken link (HTTP 404) (on 2 pages)');
+  assert.equal(merged[1].link_text, 'Gone');
+});

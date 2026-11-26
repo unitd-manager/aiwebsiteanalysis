@@ -34,6 +34,59 @@ export function extractLinks(html, baseUrl) {
   return [...out];
 }
 
+const textOf = (html) => decode(String(html).replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+const AREAS = { header: 'the header', nav: 'the menu', footer: 'the footer', aside: 'the sidebar' };
+
+/**
+ * For each link on a page: the clickable text and where it sits (menu, footer, or the heading
+ * it is under), so someone can find a broken link on the page. Returns { [url]: { text, where } }.
+ */
+export function extractLinkDetails(html, baseUrl) {
+  html = String(html);
+  const areas = [];
+  for (const tag of Object.keys(AREAS)) {
+    for (const m of html.matchAll(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'))) areas.push({ name: tag, start: m.index, end: m.index + m[0].length });
+  }
+  // Themes often use <div class="site-footer"> instead of <footer>: treat those as areas too.
+  // Only whole class/id names like "footer" or "site-footer": "card-header" inside content is not the site header.
+  for (const m of html.matchAll(/<div\b[^>]*\b(?:class|id)\s*=\s*["'](?:[^"']*\s)?(?:site-|main-|page-)?(footer|header)(?:\s[^"']*)?["'][^>]*>/gi)) {
+    const name = m[1].toLowerCase();
+    if (areas.some((a) => a.name === name && m.index >= a.start && m.index < a.end)) continue;
+    // A div's closing tag can't be found with a regex: a footer runs to the end of the page,
+    // a header to the main content (or 20k characters at most).
+    const main = html.slice(m.index).search(/<main\b/i);
+    const end = name === 'footer' ? html.length : m.index + Math.min(20_000, main > 0 ? main : 20_000);
+    areas.push({ name, start: m.index, end });
+  }
+  const headings = [...html.matchAll(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi)].map((m) => ({ at: m.index, text: textOf(m[2]).slice(0, 90) })).filter((h) => h.text);
+  const out = {};
+  for (const m of html.matchAll(/<(a|link|script|iframe)\b([^>]*?)\s(?:href|src)\s*=\s*["']([^"'#][^"']*)["']([^>]*)>(?:([\s\S]*?)<\/a>)?/gi)) {
+    let url;
+    try { const u = new URL(decode(m[3].trim()), baseUrl); u.hash = ''; url = u.toString(); } catch { continue; }
+    if (out[url]) continue;
+    const tag = m[1].toLowerCase();
+    const tagHtml = m[2] + ' ' + m[4];
+    let text = '';
+    if (tag === 'a') {
+      text = textOf(m[5] || '') || attr(tagHtml, 'aria-label') || attr(tagHtml, 'title') || '';
+      if (!text && /<img\b/i.test(m[5] || '')) {
+        const alt = (attr((m[5].match(/<img\b[^>]*>/i) || [''])[0], 'alt') || '').trim();
+        text = alt ? `(image: ${alt})` : '(image link)'; // in brackets: not visible text, so no "Find on page"
+      }
+      if (!text) text = '(icon or empty link)';
+    } else text = `(${tag === 'link' ? 'stylesheet or page resource' : tag} in the page code)`;
+    // Innermost area wins: a menu inside the header is "the menu".
+    const area = areas.filter((a) => m.index >= a.start && m.index < a.end).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
+    const heading = headings.filter((h) => h.at < m.index).pop();
+    const where = tag !== 'a' ? 'Page code (not visible on the page)'
+      : area ? `In ${AREAS[area.name]}`
+        : heading ? `Under the heading "${heading.text}"`
+          : 'In the page body';
+    out[url] = { text: decode(text).replace(/\s+/g, ' ').trim().slice(0, 200), where };
+  }
+  return out;
+}
+
 const attr = (tag, name) => tag.match(new RegExp(`\\s${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i'))?.[2];
 const firstSrcsetUrl = (srcset) => String(srcset || '').split(',').map((s) => s.trim().split(/\s+/)[0]).find(Boolean);
 const TRACKERS = /facebook\.com\/tr|bat\.bing\.com|px\.ads\.linkedin|google-analytics\.com|googletagmanager\.com|doubleclick\.net|analytics\.twitter|t\.co\/i\/adsct|pixel\.wp\.com/i;
