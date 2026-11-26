@@ -13,7 +13,7 @@ SiteGuard checks every client website around the clock. When a site goes down, i
 | Domain expiry (RDAP, official registry data) | daily | 30 / 14 / 7 / 1 days before expiry, once each |
 | **Backups** (check-in link) | every minute | When a backup doesn't check in on time, or the backup job reports a failure |
 | **Daily AI page scan** (LangGraph agent) | once a day at `DAILY_SCAN_HOUR` | Only **new** issues since the last scan |
-| Monthly client report | 1st of every month | Branded HTML email to the client |
+| Monthly client report | 1st of every month | Branded email to the client, with the report attached as a PDF |
 
 ### The daily AI page-scan agent
 
@@ -59,6 +59,10 @@ The web team is alerted when no backup arrives within the interval plus a grace 
 - **Send test alert now:** shows exactly what was delivered or why it failed.
 
 Mail-server and WhatsApp keys are secrets, so they stay in `.env`.
+
+## Monthly report
+
+On a site's page, **View monthly report** opens the report and **Download PDF** saves it as a branded PDF (uptime, downtime, renewal dates, backups, and the open issues with each broken link). The email sent to the client on the 1st of the month has the same PDF attached. A brand logo URL must point to a PNG or JPG for it to appear in the PDF.
 
 ## Plans
 

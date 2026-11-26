@@ -6,6 +6,7 @@ import { pool, initializeDatabase, deleteSite, toSql } from './db.js';
 import { runUptimeCheck, runSslCheck, runDomainCheck } from './monitor.js';
 import { runSiteScan } from './scanAgent.js';
 import { buildReport, renderReportHtml, sendMonthlyReport, previousMonth } from './report.js';
+import { renderReportPdf, fetchLogo, reportFileName } from './reportPdf.js';
 import { startScheduler } from './scheduler.js';
 import { getAiMode, isAiEnabled } from './ai.js';
 import { loadSettings, saveSettings, setting, EDITABLE } from './settings.js';
@@ -160,6 +161,14 @@ app.get('/api/sites/:id/report', wrap(async (req, res) => {
   const report = await buildReport(Number(req.params.id), month);
   if (!report) return res.status(404).send('Site not found');
   res.type('html').send(renderReportHtml(report));
+}));
+
+app.get('/api/sites/:id/report.pdf', wrap(async (req, res) => {
+  const month = /^d{4}-d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
+  const report = await buildReport(Number(req.params.id), month);
+  if (!report) return res.status(404).send('Site not found');
+  const pdf = await renderReportPdf(report, await fetchLogo());
+  res.type('pdf').attachment(reportFileName(report.site, month)).send(pdf);
 }));
 
 app.post('/api/sites/:id/report/send', wrap(async (req, res) => {

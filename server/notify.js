@@ -30,11 +30,11 @@ export function channelStatus() {
   };
 }
 
-export async function sendEmail(to, subject, text, html) {
+export async function sendEmail(to, subject, text, html, attachments) {
   const recipients = [to].flat().filter(Boolean);
   const t = mailer();
   if (!recipients.length || !t) return false;
-  await t.sendMail({ from: process.env.MAIL_FROM || process.env.SMTP_USER, to: recipients.join(', '), subject, text, html });
+  await t.sendMail({ from: process.env.MAIL_FROM || process.env.SMTP_USER, to: recipients.join(', '), subject, text, html, attachments });
   return true;
 }
 

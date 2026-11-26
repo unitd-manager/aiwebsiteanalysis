@@ -95,3 +95,21 @@ test('alerts go to the team (and client only when opted in), by email and WhatsA
     for (const k of ['WHATSAPP_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_WHATSAPP_FROM']) delete process.env[k];
   }
 });
+
+test('monthly report renders as a multi-page PDF, even with emoji and long issue lists', async () => {
+  const { renderReportPdf, reportFileName } = await import('../server/reportPdf.js');
+  setSettingsCacheForTests({ brand_name: 'Test Agency 🛡️', brand_color: '#1d4ed8' });
+  const site = { name: 'example.com', url: 'https://www.example.com/', backup_expected_hours: 24, last_backup_at: new Date(), last_backup_status: 'ok' };
+  const issues = Array.from({ length: 25 }, (_, i) => ({ severity: ['high', 'medium', 'low'][i % 3], detail: `Broken link (HTTP 404) → https://example.com/a/very/long/path/${i} “quoted” ₹799 🎉`, page_url: `https://www.example.com/page-${i}` }));
+  const pdf = await renderReportPdf({
+    site, month: '2026-10', uptime: 99.512, checks: 8000, avgMs: 420,
+    incidents: [{ started_at: new Date('2026-10-03T10:00:00Z'), resolved_at: new Date('2026-10-03T10:12:00Z'), cause: 'HTTP 502' }],
+    downtimeMinutes: 12, scan: { summary: 'Found 25 issues across 40 pages.', started_at: new Date() }, issues,
+    sslExpires: new Date(Date.now() + 10 * 86_400_000), domainExpires: null
+  });
+  assert.equal(pdf.subarray(0, 5).toString(), '%PDF-');
+  const pages = (pdf.toString('latin1').match(/\/Type \/Page\b/g) || []).length;
+  assert.ok(pages >= 2, `expected 2+ pages, got ${pages}`);
+  assert.equal(reportFileName(site, '2026-10'), 'example.com-2026-10-health-report.pdf');
+  setSettingsCacheForTests({});
+});

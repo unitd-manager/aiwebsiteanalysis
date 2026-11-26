@@ -147,6 +147,7 @@ function SiteDetail({ id, onBack, onChanged }) {
           <button onClick={() => act('check')} disabled={!!busy}>{busy === 'check' ? 'Checking…' : 'Check now'}</button>
           <button onClick={() => act('scan')} disabled={!!busy || scanRunning}>{scanRunning ? 'Scanning…' : 'Run AI page scan'}</button>
           <a className="button" href={`/api/sites/${id}/report`} target="_blank" rel="noreferrer">View monthly report</a>
+          <a className="button" href={`/api/sites/${id}/report.pdf`} download>Download PDF</a>
           <button onClick={() => act('send')} disabled={!!busy}>Email report</button>
           <button onClick={() => setEditing(true)}>Edit</button>
           <button className="danger" onClick={() => act('delete')}>Delete</button>

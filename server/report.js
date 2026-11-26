@@ -1,5 +1,6 @@
 import { pool, toSql } from './db.js';
 import { sendEmail } from './notify.js';
+import { renderReportPdf, fetchLogo, reportFileName } from './reportPdf.js';
 import { brandName, brandColor, brandLogo } from './settings.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -24,7 +25,7 @@ export async function buildReport(siteId, month) {
   const [incidents] = await pool.query('SELECT * FROM incidents WHERE site_id = ? AND started_at >= ? AND started_at < ? ORDER BY started_at', [siteId, toSql(from), toSql(to)]);
   const [[scan]] = await pool.query('SELECT * FROM scans WHERE site_id = ? AND finished_at IS NOT NULL AND error IS NULL AND started_at < ? ORDER BY started_at DESC LIMIT 1', [siteId, toSql(to)]);
   // Clients see open issues only (not ones the team marked fixed or ignored).
-  const [issues] = scan ? await pool.query(`SELECT si.type, si.severity, si.page_url, si.detail FROM scan_issues si
+  const [issues] = scan ? await pool.query(`SELECT si.type, si.severity, si.page_url, si.detail, si.evidence FROM scan_issues si
       LEFT JOIN issue_status st ON st.site_id = si.site_id AND st.fingerprint = si.fingerprint
       WHERE si.scan_id = ? AND st.status IS NULL ORDER BY FIELD(si.severity, "high", "medium", "low") LIMIT 25`, [scan.id]) : [[]];
 
@@ -65,7 +66,7 @@ export function renderReportHtml(r) {
     <h2 style="font-size:17px;margin-top:24px">Downtime</h2>
     ${r.incidents.length ? `<table style="width:100%;border-collapse:collapse" cellpadding="8"><tr style="background:#f9fafb;text-align:left"><th>Started (UTC)</th><th>Resolved</th><th>Cause</th></tr>${r.incidents.map((i) => `<tr><td>${new Date(i.started_at).toISOString().slice(0, 16).replace('T', ' ')}</td><td>${i.resolved_at ? new Date(i.resolved_at).toISOString().slice(0, 16).replace('T', ' ') : 'Ongoing'}</td><td>${esc(i.cause)}</td></tr>`).join('')}</table><p style="color:#6b7280">Total downtime: about ${r.downtimeMinutes} minutes.</p>` : '<p>No downtime this month. 🎉</p>'}
     <h2 style="font-size:17px;margin-top:24px">Website issues</h2>
-    ${r.scan ? `<p>${esc(r.scan.summary)} (last scan ${day(r.scan.started_at)})</p>${r.issues.length ? `<ul>${r.issues.map((i) => `<li><b>${esc(i.severity)}</b> – ${esc(i.detail)}<br><small style="color:#6b7280">${esc(i.page_url)}</small></li>`).join('')}</ul>` : ''}` : '<p>No page scan yet.</p>'}
+    ${r.scan ? `<p>${esc(r.scan.summary)} (last scan ${day(r.scan.started_at)})</p>${r.issues.length ? `<ul>${r.issues.map((i) => `<li><b>${esc(i.severity)}</b> – ${esc(i.detail)}${i.evidence ? `<br><small style="word-break:break-all">${esc(i.evidence)}</small>` : ''}<br><small style="color:#6b7280">${esc(i.page_url)}</small></li>`).join('')}</ul>` : ''}` : '<p>No page scan yet.</p>'}
   </div>
   <div style="padding:16px 24px;background:#f9fafb;color:#6b7280;font-size:12px">Monitored 24/7 by ${brand}. Checks run every ${Number(process.env.CHECK_INTERVAL_MINUTES || 5)} minutes.</div>
 </div></body></html>`;
@@ -84,6 +85,8 @@ export async function sendMonthlyReport(site, month = previousMonth()) {
   const report = await buildReport(site.id, month);
   const html = renderReportHtml(report);
   const text = `${site.name} – ${month}\nUptime: ${report.uptime === null ? 'no data' : report.uptime.toFixed(2) + '%'}\nIncidents: ${report.incidents.length}\nSSL expires: ${day(report.sslExpires)}\nDomain expires: ${day(report.domainExpires)}`;
-  const sent = await sendEmail(site.client_email, `${site.name}: website health report for ${month}`, text, html);
+  const pdf = await renderReportPdf(report, await fetchLogo());
+  const sent = await sendEmail(site.client_email, `${site.name}: website health report for ${month}`, text, html,
+    [{ filename: reportFileName(site, month), content: pdf, contentType: 'application/pdf' }]);
   return { sent };
 }
