@@ -175,23 +175,11 @@ function SiteDetail({ id, onBack, onChanged }) {
           </div>
         )}
         {scan?.error && <p className="error">Scan failed: {scan.error}</p>}
-        {scan?.summary && <p>{scan.summary}</p>}
-        {issues.length > 0 && (
-          <table>
-            <thead><tr><th>Severity</th><th>Type</th><th>Problem</th><th>Page</th></tr></thead>
-            <tbody>{issues.map((i) => (
-              <tr key={i.id}>
-                <td><span className={`pill sev-${i.severity}`}>{i.severity}</span></td>
-                <td>{ISSUE_LABELS[i.type] || i.type}</td>
-                <td>{i.detail}{i.evidence && (/^https?:\/\//.test(i.evidence)
-                  ? <div className="evidence"><a href={i.evidence} target="_blank" rel="noreferrer">{i.evidence}</a></div>
-                  : <div className="evidence">{i.evidence}</div>)}</td>
-                <td><a href={i.page_url} target="_blank" rel="noreferrer">{new URL(i.page_url).pathname}</a></td>
-              </tr>))}
-            </tbody>
-          </table>
-        )}
+        {scan?.summary && scan.finished_at && !scan.error && <p>{scan.summary}</p>}
+        <IssueTable siteId={id} issues={issues} onChanged={load} />
       </div>
+
+      <BackupCard site={site} onChanged={load} />
 
       <div className="grid2">
         <div className="card">
@@ -203,6 +191,113 @@ function SiteDetail({ id, onBack, onChanged }) {
           {alerts.length ? <ul className="list">{alerts.map((a, i) => <li key={i}>{a.subject}<div className="muted">{fmtTime(a.created_at)} · {a.channels || 'pending'}</div></li>)}</ul> : <p className="muted">No alerts yet.</p>}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Issues from the latest scan, with Fixed / Ignore. NEW = not seen in the previous scan.
+function IssueTable({ siteId, issues, onChanged }) {
+  const [filter, setFilter] = useState('open');
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState('');
+  const counts = {
+    open: issues.filter((i) => !i.status).length,
+    new: issues.filter((i) => !i.status && i.is_new).length,
+    fixed: issues.filter((i) => i.status === 'fixed').length,
+    ignored: issues.filter((i) => i.status === 'ignored').length
+  };
+  const shown = issues.filter((i) => (filter === 'open' ? !i.status : filter === 'new' ? !i.status && i.is_new : i.status === filter));
+  async function mark(issue, status) {
+    setBusyId(issue.id); setError('');
+    try { await api(`/sites/${siteId}/issues/${issue.id}/status`, { method: 'POST', body: { status } }); await onChanged(); }
+    catch (e) { setError(e.message); } finally { setBusyId(null); }
+  }
+  if (!issues.length) return null;
+  return (
+    <>
+      <div className="tabs" role="tablist">
+        {[['open', 'Open'], ['new', 'New'], ['fixed', 'Marked fixed'], ['ignored', 'Ignored']].map(([key, label]) => (
+          <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'tab active' : 'tab'} onClick={() => setFilter(key)}>{label} ({counts[key]})</button>
+        ))}
+      </div>
+      {error && <p className="error">{error}</p>}
+      {shown.length === 0 ? <p className="muted">{filter === 'open' ? '🎉 No open issues. Everything found has been fixed or ignored.' : 'Nothing here.'}</p> : (
+        <table>
+          <thead><tr><th>Severity</th><th>Type</th><th>Problem</th><th>Page</th><th></th></tr></thead>
+          <tbody>{shown.map((i) => (
+            <tr key={i.id}>
+              <td><span className={`pill sev-${i.severity}`}>{i.severity}</span>{!i.status && i.is_new ? <span className="pill new">NEW</span> : null}</td>
+              <td>{ISSUE_LABELS[i.type] || i.type}</td>
+              <td>{i.detail}{i.evidence && (/^https?:\/\//.test(i.evidence)
+                ? <div className="evidence"><a href={i.evidence} target="_blank" rel="noreferrer">{i.evidence}</a></div>
+                : <div className="evidence">{i.evidence}</div>)}</td>
+              <td><a href={i.page_url} target="_blank" rel="noreferrer">{new URL(i.page_url).pathname}</a></td>
+              <td className="row-actions">
+                {i.status
+                  ? <button className="small" disabled={busyId === i.id} onClick={() => mark(i, 'open')}>Reopen</button>
+                  : <>
+                      <button className="small" disabled={busyId === i.id} onClick={() => mark(i, 'fixed')} title="Hide it. If the next scan still finds it, it comes back as NEW.">✓ Fixed</button>
+                      <button className="small" disabled={busyId === i.id} onClick={() => mark(i, 'ignored')} title="Never count or alert about this again.">Ignore</button>
+                    </>}
+              </td>
+            </tr>))}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+}
+
+// Backup monitoring: the backup job calls a secret link after each backup.
+function BackupCard({ site, onChanged }) {
+  const [hours, setHours] = useState(site.backup_expected_hours || 24);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const enabled = Boolean(site.backup_expected_hours);
+  const link = site.backup_token ? `${location.origin}/api/backup-checkin/${site.backup_token}` : '';
+  async function save(expected_hours) {
+    setBusy(true); setError('');
+    try { await api(`/sites/${site.id}/backup`, { method: 'PUT', body: { expected_hours } }); await onChanged(); }
+    catch (e) { setError(e.message); } finally { setBusy(false); }
+  }
+  async function newLink() {
+    if (!confirm('Make a new check-in link? The old link stops working, so update the backup job too.')) return;
+    await api(`/sites/${site.id}/backup/new-link`, { method: 'POST' }); await onChanged();
+  }
+  const copy = () => { navigator.clipboard?.writeText(`curl -fsS ${link}`).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); };
+  const status = site.last_backup_status;
+  return (
+    <div className="card">
+      <h3>Backups</h3>
+      {!enabled ? (
+        <>
+          <p className="muted">Get an alert when this site's backup doesn't run. The backup job (cron, WordPress plugin, hosting panel) calls a secret link after every backup; if no backup checks in on time, the web team is alerted.</p>
+          <div className="actions inline-form">
+            <label>Backup expected every <input type="number" min="1" max="744" value={hours} onChange={(e) => setHours(e.target.value)} /> hours</label>
+            <button className="primary" disabled={busy} onClick={() => save(Number(hours))}>Turn on backup monitoring</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p>
+            Status: <b className={status === 'ok' ? 'ok' : status ? 'bad' : 'warn'}>{status === 'ok' ? 'Backups OK' : status === 'fail' ? 'Last backup FAILED' : status === 'missed' ? 'Backup MISSED' : 'Waiting for first backup'}</b>
+            {' · '}Last backup: <b>{site.last_backup_at ? fmtTime(site.last_backup_at) : 'none yet'}</b>
+            {' · '}Expected every {site.backup_expected_hours} h
+          </p>
+          {site.last_backup_message && <p className="muted small">Message from backup job: {site.last_backup_message}</p>}
+          <p className="small">Add this as the <b>last step of the backup job</b>:</p>
+          <div className="code-row"><code>curl -fsS {link}</code><button className="small" onClick={copy}>{copied ? 'Copied ✓' : 'Copy'}</button></div>
+          <p className="muted small">To report a failure: <code>curl -fsS "{link}?status=fail&amp;message=disk%20full"</code></p>
+          <div className="actions">
+            <label className="small">Every <input type="number" min="1" max="744" value={hours} onChange={(e) => setHours(e.target.value)} /> hours</label>
+            <button className="small" disabled={busy} onClick={() => save(Number(hours))}>Save interval</button>
+            <button className="small" onClick={newLink}>New link</button>
+            <button className="small danger" disabled={busy} onClick={() => save(null)}>Turn off</button>
+          </div>
+        </>
+      )}
+      {error && <p className="error">{error}</p>}
     </div>
   );
 }
@@ -259,31 +354,108 @@ function AnalyzeBox({ onAdded, onMore }) {
   );
 }
 
+function SettingsPage({ onBack, onSaved }) {
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState({});
+  const [msg, setMsg] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState('');
+  const [test, setTest] = useState(null);
+  const load = useCallback(() => api('/settings').then((d) => { setData(d); setForm(d.values); }).catch((e) => setError(e.message)), []);
+  useEffect(() => { load(); }, [load]);
+  if (!data) return <p className="muted">{error || 'Loading…'}</p>;
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
+  async function save(e) {
+    e.preventDefault();
+    setBusy('save'); setMsg(''); setError('');
+    try { await api('/settings', { method: 'PUT', body: form }); setMsg('Saved.'); await load(); onSaved(); }
+    catch (err) { setError(err.message); } finally { setBusy(''); }
+  }
+  async function sendTest() {
+    setBusy('test'); setTest(null); setError('');
+    try { setTest(await api('/settings/test-alert', { method: 'POST' })); } catch (err) { setError(err.message); } finally { setBusy(''); }
+  }
+  const ch = data.channels;
+  return (
+    <div>
+      <button className="link" onClick={onBack}>← All sites</button>
+      <h2>Settings</h2>
+      {msg && <p className="notice">{msg}</p>}
+      {error && <p className="error">{error}</p>}
+
+      <form className="card form" onSubmit={save}>
+        <h3>Alerts go to (web team)</h3>
+        <div className="grid2">
+          <label>Team email (several: separate with commas)<input value={form.team_email || ''} onChange={set('team_email')} placeholder="webteam@company.com" /></label>
+          <label>Team WhatsApp number<input value={form.team_whatsapp || ''} onChange={set('team_whatsapp')} placeholder="+919876543210" /></label>
+        </div>
+        <h3 style={{ marginTop: 18 }}>Branding (alerts and monthly client reports)</h3>
+        <div className="grid2">
+          <label>Brand name<input value={form.brand_name || ''} onChange={set('brand_name')} placeholder="SiteGuard" /></label>
+          <label>Brand colour<span className="color-row"><input type="color" value={/^#[0-9a-f]{6}$/i.test(form.brand_color || '') ? form.brand_color : '#0f766e'} onChange={set('brand_color')} aria-label="Pick colour" /><input value={form.brand_color || ''} onChange={set('brand_color')} placeholder="#0f766e" /></span></label>
+          <label>Logo URL (https://…)<input value={form.brand_logo_url || ''} onChange={set('brand_logo_url')} placeholder="https://yourdomain.com/logo.png" /></label>
+        </div>
+        <div className="actions"><button className="primary" disabled={!!busy}>{busy === 'save' ? 'Saving…' : 'Save settings'}</button></div>
+      </form>
+
+      <div className="card">
+        <h3>Alert channels</h3>
+        <ul className="list">
+          <li><b className={ch.email.ready ? 'ok' : 'warn'}>{ch.email.ready ? '✓ Email ready' : '✗ Email not ready'}</b>{ch.email.smtpHost && <span className="muted"> · SMTP {ch.email.smtpHost}</span>}{!ch.email.ready && <div className="muted small">Missing: {ch.email.missing.join(', ')}</div>}</li>
+          <li><b className={ch.whatsapp.ready ? 'ok' : 'warn'}>{ch.whatsapp.ready ? '✓ WhatsApp ready' : '✗ WhatsApp not ready'}</b>{ch.whatsapp.provider && <span className="muted"> · {ch.whatsapp.provider}</span>}{!ch.whatsapp.ready && <div className="muted small">Missing: {ch.whatsapp.missing.join(', ')}</div>}</li>
+          <li><b className={data.scheduler ? 'ok' : 'warn'}>{data.scheduler ? '✓ 24/7 monitoring is on' : '✗ 24/7 monitoring is off'}</b>{!data.scheduler && <div className="muted small">Set SCHEDULER_ENABLED=1 in the server .env and restart.</div>}</li>
+        </ul>
+        <p className="muted small">Mail server and WhatsApp keys are secrets, so they are set in the server's .env file (see README), not here.</p>
+        <button onClick={sendTest} disabled={!!busy}>{busy === 'test' ? 'Sending…' : 'Send test alert now'}</button>
+        {test && (
+          <div className={`notice ${test.delivered?.length ? '' : 'warn-box'}`} style={{ marginTop: 10 }}>
+            {test.delivered?.length ? <>✓ Sent by <b>{test.delivered.join(' and ')}</b>. Check your inbox / WhatsApp.</> : <>Nothing was delivered. The test alert is saved on the dashboard only.</>}
+            {test.errors?.map((e, i) => <div key={i} className="error small">{e}</div>)}
+          </div>
+        )}
+      </div>
+
+    </div>
+  );
+}
+
 function App() {
   const [overview, setOverview] = useState(null);
   const [sites, setSites] = useState([]);
   const [adding, setAdding] = useState(false);
-  const [openId, setOpenId] = useState(() => Number(location.hash.match(/site-(\d+)/)?.[1]) || null);
+  // Views live in the URL hash: #site-4 opens a site, #settings opens Settings.
+  const viewFromHash = () => (location.hash === '#settings' ? 'settings' : Number(location.hash.match(/site-(\d+)/)?.[1]) || null);
+  const [view, setView] = useState(viewFromHash);
+  const openId = typeof view === 'number' ? view : null;
+  const setOpenId = (id) => setView(id);
   const [error, setError] = useState('');
   const refresh = useCallback(() => Promise.all([api('/overview').then(setOverview), api('/sites').then(setSites)]).then(() => setError('')).catch((e) => setError(isNetworkError(e) ? '⚠️ Lost connection to the SiteGuard server. Reconnecting automatically…' : e.message)), []);
   useEffect(() => { refresh(); const t = setInterval(refresh, 30_000); return () => clearInterval(t); }, [refresh]);
-  useEffect(() => { location.hash = openId ? `site-${openId}` : ''; }, [openId]);
+  useEffect(() => { const h = view === 'settings' ? 'settings' : view ? `site-${view}` : ''; if (location.hash.slice(1) !== h) location.hash = h; }, [view]);
   // Links like /#site-4 (from alert emails, or pasted while the app is open) open that site.
   useEffect(() => {
-    const onHash = () => setOpenId(Number(location.hash.match(/site-(\d+)/)?.[1]) || null);
+    const onHash = () => setView(viewFromHash());
     addEventListener('hashchange', onHash);
     return () => removeEventListener('hashchange', onHash);
   }, []);
+  const brand = overview?.brand?.name || 'SiteGuard';
+  useEffect(() => { document.title = brand; }, [brand]);
 
   return (
     <div className="app">
-      <header>
-        <div className="brand">🛡️ SiteGuard <small>AI website health monitor</small></div>
-        {openId && <button className="primary" onClick={() => setOpenId(null)}>+ Check another website</button>}
+      <header style={overview?.brand?.color ? { background: overview.brand.color } : undefined}>
+        <button className="brand plain" onClick={() => setView(null)}>🛡️ {brand} <small>AI website health monitor</small></button>
+        <div className="actions">
+          {view && <button className="primary" onClick={() => setView(null)}>+ Check another website</button>}
+          <button className="header-btn" onClick={() => setView('settings')}>⚙ Settings</button>
+        </div>
       </header>
       <main>
-        {error && !openId && <p className="error">{error}</p>}
-        {openId ? (
+        {error && !view && <p className="error">{error}</p>}
+        {view === 'settings' ? (
+          <SettingsPage onBack={() => setView(null)} onSaved={refresh} />
+        ) : openId ? (
           <SiteDetail id={openId} onBack={() => setOpenId(null)} onChanged={refresh} />
         ) : (
           <>

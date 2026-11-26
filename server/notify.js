@@ -1,8 +1,13 @@
 import nodemailer from 'nodemailer';
 import { pool } from './db.js';
+import { setting, brandName } from './settings.js';
 
 let transport;
+let transportForTests = null;
+export function setMailTransportForTests(t) { transportForTests = t; }
+
 function mailer() {
+  if (transportForTests) return transportForTests;
   if (!process.env.SMTP_HOST) return null;
   transport ||= nodemailer.createTransport({
     host: process.env.SMTP_HOST,
@@ -13,6 +18,18 @@ function mailer() {
   return transport;
 }
 
+/** Which channels can send right now, and what is missing (shown on the Settings page). */
+export function channelStatus() {
+  const provider = (process.env.WHATSAPP_PROVIDER || '').toLowerCase();
+  const waKeys = provider === 'twilio' ? ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_WHATSAPP_FROM'] : provider === 'meta' ? ['META_WHATSAPP_TOKEN', 'META_WHATSAPP_PHONE_ID'] : [];
+  const emailMissing = [!process.env.SMTP_HOST && 'SMTP_HOST in .env', !setting('team_email') && 'team email'].filter(Boolean);
+  const waMissing = [!provider && 'WHATSAPP_PROVIDER in .env', ...waKeys.filter((k) => !process.env[k]).map((k) => `${k} in .env`), !setting('team_whatsapp') && 'team WhatsApp number'].filter(Boolean);
+  return {
+    email: { ready: !emailMissing.length, missing: emailMissing, smtpHost: process.env.SMTP_HOST || null },
+    whatsapp: { ready: !waMissing.length, missing: waMissing, provider: provider || null }
+  };
+}
+
 export async function sendEmail(to, subject, text, html) {
   const recipients = [to].flat().filter(Boolean);
   const t = mailer();
@@ -21,7 +38,7 @@ export async function sendEmail(to, subject, text, html) {
   return true;
 }
 
-const normalizePhone = (n) => String(n || '').replace(/[^\d+]/g, '').replace(/^(?!\+)/, '+');
+export const normalizePhone = (n) => String(n || '').replace(/[^\d+]/g, '').replace(/^(?!\+)/, '+');
 
 export async function sendWhatsApp(to, text) {
   const provider = (process.env.WHATSAPP_PROVIDER || '').toLowerCase();
@@ -40,7 +57,7 @@ export async function sendWhatsApp(to, text) {
     return true;
   }
   if (provider === 'meta') {
-    // Note: Meta only delivers free-form text inside a 24h customer-service window. For cold alerts,
+    // Meta only delivers free-form text inside a 24h customer-service window. For cold alerts,
     // create an approved template and switch this payload to type "template".
     const res = await fetch(`https://graph.facebook.com/v21.0/${process.env.META_WHATSAPP_PHONE_ID}/messages`, {
       method: 'POST',
@@ -51,6 +68,28 @@ export async function sendWhatsApp(to, text) {
     return true;
   }
   throw new Error(`Unknown WHATSAPP_PROVIDER "${provider}"`);
+}
+
+/** Who receives an alert: always the web team, plus the client when the site opts in. */
+export function alertRecipients(site, includeClient = true) {
+  const emails = [setting('team_email')];
+  const phones = [setting('team_whatsapp')];
+  if (includeClient && site?.alert_client) { emails.push(site.client_email); phones.push(site.client_whatsapp); }
+  const uniq = (list) => [...new Set(list.map((x) => String(x || '').trim()).filter(Boolean))];
+  return { emails: uniq(emails), phones: uniq(phones.map((p) => p && normalizePhone(p))) };
+}
+
+/** Send one alert on every configured channel. Returns what was delivered and any errors. */
+export async function deliverAlert({ emails, phones, subject, message }) {
+  const delivered = new Set();
+  const errors = [];
+  const fullSubject = `[${brandName()}] ${subject}`;
+  const jobs = [
+    sendEmail(emails, fullSubject, message).then((ok) => ok && delivered.add('email')).catch((e) => errors.push(`Email: ${e.message}`)),
+    ...phones.map((p) => sendWhatsApp(p, `${subject}\n\n${message}`).then((ok) => ok && delivered.add('whatsapp')).catch((e) => errors.push(`WhatsApp ${p}: ${e.message}`)))
+  ];
+  await Promise.all(jobs);
+  return { delivered: [...delivered], errors };
 }
 
 /**
@@ -66,18 +105,10 @@ export async function raiseAlert(site, { kind, dedupeKey = null, subject, messag
     if (error.code === 'ER_DUP_ENTRY') return { skipped: true };
     throw error;
   }
-  const emails = [process.env.TEAM_EMAIL];
-  const phones = [process.env.TEAM_WHATSAPP];
-  if (includeClient && site?.alert_client) { emails.push(site.client_email); phones.push(site.client_whatsapp); }
-
-  const delivered = [];
-  const attempts = [
-    sendEmail(emails.filter(Boolean), `[${process.env.BRAND_NAME || 'SiteGuard'}] ${subject}`, message).then((ok) => ok && delivered.push('email')),
-    ...[...new Set(phones.filter(Boolean))].map((p) => sendWhatsApp(p, `${subject}\n\n${message}`).then((ok) => ok && delivered.push('whatsapp')))
-  ];
-  const results = await Promise.allSettled(attempts);
-  for (const r of results) if (r.status === 'rejected') console.error('[alert] delivery failed:', r.reason?.message);
-  if (!delivered.length) console.log(`[alert] ${subject} — ${message.split('\n')[0]} (no channel configured, saved to dashboard only)`);
-  await pool.query('UPDATE alerts SET channels = ? WHERE id = ?', [[...new Set(delivered)].join(',') || 'dashboard', alertId]);
-  return { id: alertId, delivered };
+  const { emails, phones } = alertRecipients(site, includeClient);
+  const { delivered, errors } = await deliverAlert({ emails, phones, subject, message });
+  for (const e of errors) console.error('[alert] delivery failed:', e);
+  if (!delivered.length) console.log(`[alert] ${subject} (no channel delivered; saved to dashboard)`);
+  await pool.query('UPDATE alerts SET channels = ? WHERE id = ?', [delivered.join(',') || (errors.length ? 'failed' : 'dashboard'), alertId]);
+  return { id: alertId, delivered, errors };
 }

@@ -146,15 +146,52 @@ export function findDates(text) {
 }
 
 /**
+ * Dates written without a year, e.g. "October 26th | 11:00 AM" on a webinar banner.
+ * The year is inferred: this year, unless that is more than ~6 months ahead (then last year,
+ * e.g. "December 15th" read in January). Month names must be capitalised so the verb "may" and
+ * similar words don't count. Context includes the line above, where banner titles usually sit.
+ */
+export function findYearlessDates(text, now = new Date()) {
+  const results = [];
+  const patterns = [
+    // 26 October / 26th Oct (not followed by a year)
+    [new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+${MONTH_RE}\\b(?!\\.?,?\\s*\\d{4})`, 'gi'), (m) => [m[2], m[1]]],
+    // October 26 / October 26th (not followed by a year or more digits)
+    [new RegExp(`\\b${MONTH_RE}\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?!,?\\s*\\d{4})(?![\\d:])`, 'gi'), (m) => [m[1], m[2]]]
+  ];
+  const seen = new Set();
+  for (const [re, parts] of patterns) {
+    for (const m of text.matchAll(re)) {
+      const [monthWord, day] = parts(m);
+      if (!/^[A-Z]/.test(monthWord) || seen.has(m.index)) continue;
+      seen.add(m.index);
+      const month = MONTHS[monthWord.toLowerCase().slice(0, 3)];
+      let date = new Date(Date.UTC(now.getUTCFullYear(), month, Number(day)));
+      if (Number.isNaN(date.getTime()) || date.getUTCDate() !== Number(day)) continue;
+      if (date - now > 183 * 86_400_000) date = new Date(Date.UTC(now.getUTCFullYear() - 1, month, Number(day)));
+      const prevNl = text.lastIndexOf('\n', m.index);
+      const lineStart = Math.max(prevNl > 0 ? text.lastIndexOf('\n', prevNl - 1) + 1 : 0, m.index - 160);
+      const nl = text.indexOf('\n', m.index + m[0].length);
+      const lineEnd = Math.min(nl === -1 ? text.length : nl, m.index + m[0].length + 120);
+      results.push({ raw: m[0], date, context: text.slice(lineStart, lineEnd).replace(/\s+/g, ' ').trim(), yearless: true });
+    }
+  }
+  return results;
+}
+
+const NOT_EVENT = /(©|copyright|posted on|published|updated on|last updated)/i;
+
+/**
  * Past dates that sit next to event/offer wording, e.g. "Join our webinar on 12 Oct 2025".
- * Copyright lines and blog post dates are ignored.
+ * Copyright lines and blog post dates are ignored. Dates without a year only count when they
+ * passed within the last 120 days (older ones most likely mean next year).
  */
 export function expiredEventDates(text, now = new Date()) {
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  return findDates(text).filter(({ date, context }) =>
-    date.getTime() < today &&
-    EVENT_WORDS.test(context) &&
-    !/(©|copyright|posted on|published|updated on|last updated)/i.test(context));
+  const withYear = findDates(text).filter(({ date, context }) => date.getTime() < today && EVENT_WORDS.test(context) && !NOT_EVENT.test(context));
+  const yearless = findYearlessDates(text, now).filter(({ date, context }) =>
+    date.getTime() < today && today - date.getTime() <= 120 * 86_400_000 && EVENT_WORDS.test(context) && !NOT_EVENT.test(context));
+  return [...withYear, ...yearless];
 }
 
 /** "© 2023" in the footer when it is already a later year. */

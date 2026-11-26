@@ -1,5 +1,6 @@
 import { pool, toSql } from './db.js';
 import { sendEmail } from './notify.js';
+import { brandName, brandColor, brandLogo } from './settings.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const day = (d) => (d ? new Date(d).toISOString().slice(0, 10) : '—');
@@ -21,8 +22,11 @@ export async function buildReport(siteId, month) {
   if (!site) return null;
   const [[stats]] = await pool.query('SELECT COUNT(*) AS total, SUM(ok) AS up, AVG(CASE WHEN ok THEN response_ms END) AS avgMs FROM checks WHERE site_id = ? AND checked_at >= ? AND checked_at < ?', [siteId, toSql(from), toSql(to)]);
   const [incidents] = await pool.query('SELECT * FROM incidents WHERE site_id = ? AND started_at >= ? AND started_at < ? ORDER BY started_at', [siteId, toSql(from), toSql(to)]);
-  const [[scan]] = await pool.query('SELECT * FROM scans WHERE site_id = ? AND finished_at IS NOT NULL AND started_at < ? ORDER BY started_at DESC LIMIT 1', [siteId, toSql(to)]);
-  const [issues] = scan ? await pool.query('SELECT type, severity, page_url, detail FROM scan_issues WHERE scan_id = ? ORDER BY FIELD(severity, "high", "medium", "low") LIMIT 25', [scan.id]) : [[]];
+  const [[scan]] = await pool.query('SELECT * FROM scans WHERE site_id = ? AND finished_at IS NOT NULL AND error IS NULL AND started_at < ? ORDER BY started_at DESC LIMIT 1', [siteId, toSql(to)]);
+  // Clients see open issues only (not ones the team marked fixed or ignored).
+  const [issues] = scan ? await pool.query(`SELECT si.type, si.severity, si.page_url, si.detail FROM scan_issues si
+      LEFT JOIN issue_status st ON st.site_id = si.site_id AND st.fingerprint = si.fingerprint
+      WHERE si.scan_id = ? AND st.status IS NULL ORDER BY FIELD(si.severity, "high", "medium", "low") LIMIT 25`, [scan.id]) : [[]];
 
   const total = Number(stats.total || 0);
   const uptime = total ? (Number(stats.up) / total) * 100 : null;
@@ -35,9 +39,9 @@ export async function buildReport(siteId, month) {
 }
 
 export function renderReportHtml(r) {
-  const brand = esc(process.env.BRAND_NAME || 'SiteGuard');
-  const color = /^#[0-9a-f]{3,8}$/i.test(process.env.BRAND_COLOR || '') ? process.env.BRAND_COLOR : '#0f766e';
-  const logo = process.env.BRAND_LOGO_URL ? `<img src="${esc(process.env.BRAND_LOGO_URL)}" alt="${brand}" style="height:36px">` : `<strong style="font-size:20px">${brand}</strong>`;
+  const brand = esc(brandName());
+  const color = brandColor();
+  const logo = /^https?:\/\//i.test(brandLogo()) ? `<img src="${esc(brandLogo())}" alt="${brand}" style="height:36px">` : `<strong style="font-size:20px">${brand}</strong>`;
   const monthName = new Date(`${r.month}-01T00:00:00Z`).toLocaleString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
   const uptimeTxt = r.uptime === null ? 'No data' : `${r.uptime.toFixed(2)}%`;
   const renew = (label, d) => {
@@ -56,6 +60,8 @@ export function renderReportHtml(r) {
     <table style="width:100%;border-spacing:8px"><tr>${card('Uptime', uptimeTxt)}${card('Downtime incidents', r.incidents.length)}${card('Avg response', r.avgMs ? `${r.avgMs} ms` : '—')}</tr></table>
     <h2 style="font-size:17px;margin-top:24px">Renewal dates</h2>
     <table style="width:100%;border-collapse:collapse" cellpadding="8"><tr style="background:#f9fafb;text-align:left"><th>Item</th><th>Expires</th><th>Time left</th></tr>${renew('SSL certificate', r.sslExpires)}${renew('Domain name', r.domainExpires)}</table>
+    ${r.site.backup_expected_hours ? `<h2 style="font-size:17px;margin-top:24px">Backups</h2>
+    <p>Expected every ${r.site.backup_expected_hours} h. Last backup: <b>${r.site.last_backup_at ? new Date(r.site.last_backup_at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'none received yet'}</b>${r.site.last_backup_status === 'fail' ? ' <span style="color:#b91c1c">(reported FAILED)</span>' : ''}</p>` : ''}
     <h2 style="font-size:17px;margin-top:24px">Downtime</h2>
     ${r.incidents.length ? `<table style="width:100%;border-collapse:collapse" cellpadding="8"><tr style="background:#f9fafb;text-align:left"><th>Started (UTC)</th><th>Resolved</th><th>Cause</th></tr>${r.incidents.map((i) => `<tr><td>${new Date(i.started_at).toISOString().slice(0, 16).replace('T', ' ')}</td><td>${i.resolved_at ? new Date(i.resolved_at).toISOString().slice(0, 16).replace('T', ' ') : 'Ongoing'}</td><td>${esc(i.cause)}</td></tr>`).join('')}</table><p style="color:#6b7280">Total downtime: about ${r.downtimeMinutes} minutes.</p>` : '<p>No downtime this month. 🎉</p>'}
     <h2 style="font-size:17px;margin-top:24px">Website issues</h2>

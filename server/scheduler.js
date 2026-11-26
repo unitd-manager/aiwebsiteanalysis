@@ -2,10 +2,12 @@ import { pool } from './db.js';
 import { runUptimeCheck, runSslCheck, runDomainCheck } from './monitor.js';
 import { runSiteScan } from './scanAgent.js';
 import { sendMonthlyReport, previousMonth } from './report.js';
+import { checkBackups } from './backups.js';
 
 const HOUR = 3_600_000;
 let busy = false;
 let scanning = false;
+const scanAttempts = new Map();
 
 async function inBatches(items, size, fn) {
   for (let i = 0; i < items.length; i += size) {
@@ -31,13 +33,19 @@ export async function tick(now = new Date()) {
     const scanHour = Number(process.env.DAILY_SCAN_HOUR ?? 6);
     const todayStart = new Date(now); todayStart.setHours(scanHour, 0, 0, 0);
     // Runs in the background so long scans never delay uptime checks.
-    const dueScans = sites.filter((s) => !s.last_scan_at || new Date(s.last_scan_at) < todayStart);
+    // A failed scan doesn't update last_scan_at; wait 2 hours before retrying it instead of every minute.
+    const dueScans = sites.filter((s) => (!s.last_scan_at || new Date(s.last_scan_at) < todayStart) && now - (scanAttempts.get(s.id) || 0) > 2 * HOUR);
     if (now >= todayStart && dueScans.length && !scanning) {
       scanning = true;
       (async () => {
-        for (const site of dueScans) await runSiteScan(site).catch((e) => console.error(`[scan] ${site.name}:`, e.message));
+        for (const site of dueScans) {
+          scanAttempts.set(site.id, Date.now());
+          await runSiteScan(site).catch((e) => console.error(`[scan] ${site.name}:`, e.message));
+        }
       })().finally(() => { scanning = false; });
     }
+
+    await checkBackups(now).catch((e) => console.error('[backup]', e.message));
 
     // Monthly client reports on the 1st (sendMonthlyReport sends each month only once).
     if (now.getDate() === 1 && now.getHours() >= 9) {

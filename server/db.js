@@ -10,6 +10,9 @@ const connection = {
 };
 
 export const pool = mysql.createPool({ ...connection, database: dbName, waitForConnections: true, connectionLimit: 10, charset: 'utf8mb4', dateStrings: false, timezone: 'Z' });
+// Store and read every time in UTC. Without this, columns MySQL fills itself (created_at)
+// use the server's local zone (e.g. IST) and come back hours off.
+pool.pool.on('connection', (conn) => conn.query("SET time_zone = '+00:00'"));
 
 const TABLES = [
   `CREATE TABLE IF NOT EXISTS sites (
@@ -93,8 +96,30 @@ const TABLES = [
     INDEX (site_id),
     FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE CASCADE,
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
+  )`,
+  // App settings edited on the Settings page (branding, alert contacts).
+  `CREATE TABLE IF NOT EXISTS settings (
+    name VARCHAR(64) PRIMARY KEY,
+    value TEXT NULL
+  )`,
+  // Issues the team marked "fixed" or "ignored", remembered across daily scans by fingerprint.
+  `CREATE TABLE IF NOT EXISTS issue_status (
+    site_id INT NOT NULL,
+    fingerprint VARCHAR(191) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (site_id, fingerprint),
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
   )`
 ];
+
+async function addColumns(table, columns) {
+  const [cols] = await pool.query(`SHOW COLUMNS FROM \`${table}\``);
+  const have = new Set(cols.map((c) => c.Field));
+  for (const [name, type] of Object.entries(columns)) {
+    if (!have.has(name)) await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${name}\` ${type}`);
+  }
+}
 
 export async function initializeDatabase() {
   const conn = await mysql.createConnection(connection);
@@ -104,26 +129,34 @@ export async function initializeDatabase() {
   // transactions. Force InnoDB on create, and convert tables created earlier.
   for (const sql of TABLES) await pool.query(`${sql} ENGINE=InnoDB`);
   const [engines] = await pool.query("SELECT TABLE_NAME AS name, ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()");
-  for (const name of ['sites', 'checks', 'incidents', 'alerts', 'scans', 'scan_issues']) {
+  for (const name of ['sites', 'checks', 'incidents', 'alerts', 'scans', 'scan_issues', 'settings', 'issue_status']) {
     if (engines.find((t) => t.name === name)?.engine !== 'InnoDB') await pool.query(`ALTER TABLE \`${name}\` ENGINE=InnoDB`);
   }
   await removeOrphans();
-  const [cols] = await pool.query('SHOW COLUMNS FROM scans');
-  if (!cols.some((c) => c.Field === 'progress')) await pool.query('ALTER TABLE scans ADD COLUMN progress VARCHAR(200) NULL');
+  await addColumns('scans', { progress: 'VARCHAR(200) NULL' });
+  await addColumns('scan_issues', { fingerprint: 'VARCHAR(191) NULL', is_new: 'TINYINT(1) NOT NULL DEFAULT 0' });
+  await addColumns('sites', {
+    backup_token: 'VARCHAR(64) NULL',
+    backup_expected_hours: 'INT NULL',
+    backup_since: 'DATETIME NULL',
+    last_backup_at: 'DATETIME NULL',
+    last_backup_status: 'VARCHAR(16) NULL',
+    last_backup_message: 'VARCHAR(500) NULL'
+  });
   // A server restart mid-scan leaves it "running" forever; close those out.
   await pool.query("UPDATE scans SET finished_at = UTC_TIMESTAMP(), error = 'Stopped: the server restarted during the scan. Run it again.' WHERE finished_at IS NULL");
 }
 
 // Rows whose site was deleted (left behind where foreign keys were not enforced).
 export async function removeOrphans() {
-  for (const table of ['checks', 'incidents', 'alerts', 'scan_issues', 'scans']) {
+  for (const table of ['checks', 'incidents', 'alerts', 'scan_issues', 'scans', 'issue_status']) {
     await pool.query(`DELETE t FROM \`${table}\` t LEFT JOIN sites s ON s.id = t.site_id WHERE t.site_id IS NOT NULL AND s.id IS NULL`);
   }
 }
 
 /** Delete a site and everything recorded for it (does not rely on foreign keys). */
 export async function deleteSite(id) {
-  for (const table of ['scan_issues', 'scans', 'checks', 'incidents', 'alerts']) await pool.query(`DELETE FROM \`${table}\` WHERE site_id = ?`, [id]);
+  for (const table of ['scan_issues', 'scans', 'checks', 'incidents', 'alerts', 'issue_status']) await pool.query(`DELETE FROM \`${table}\` WHERE site_id = ?`, [id]);
   await pool.query('DELETE FROM sites WHERE id = ?', [id]);
 }
 

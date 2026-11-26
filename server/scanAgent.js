@@ -13,6 +13,7 @@ import { USER_AGENT, readCapped, describeFetchError, isCertError, lenientGet } f
 import { pageText, pageTitle, extractLinks, extractImages, isDevHost, isPageLink, findErrorMessages, expiredEventDates, staleCopyright } from './pages.js';
 import { createChatModel, isAiEnabled, textOf } from './ai.js';
 import { raiseAlert } from './notify.js';
+import { classifyIssues, loadIssueMemory, setIssueStatus } from './issues.js';
 
 const ScanState = Annotation.Root({
   site: Annotation(),
@@ -231,7 +232,7 @@ async function ruleChecks(state) {
     for (const d of expiredEventDates(page.text, now)) {
       if (seenDates.has(d.raw)) continue;
       seenDates.add(d.raw);
-      issues.push({ type: 'expired_date', severity: 'medium', page_url: page.url, detail: `Event/offer date ${d.raw} has already passed`, evidence: d.context.slice(0, 300) });
+      issues.push({ type: 'expired_date', severity: 'medium', page_url: page.url, detail: d.yearless ? `Event/offer date "${d.raw}" (no year written, read as ${d.date.toISOString().slice(0, 10)}) has already passed` : `Event/offer date ${d.raw} has already passed`, evidence: d.context.slice(0, 300) });
     }
     const c = staleCopyright(page.text, now);
     if (c && !copyrightFlagged) {
@@ -334,26 +335,33 @@ export async function runSiteScan(site) {
   try {
     const result = await scanGraph.invoke({ site, now: startedAt.toISOString(), scanId });
     lastProgress.delete(scanId);
-    const issues = dedupeIssues(result.issues);
+    const memory = await loadIssueMemory(site.id);
+    const { issues, reopened } = classifyIssues(dedupeIssues(result.issues), memory.prevFingerprints, memory.statuses);
     for (const i of issues) {
-      await pool.query('INSERT INTO scan_issues (scan_id, site_id, type, severity, page_url, detail, evidence) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [scanId, site.id, i.type, i.severity, i.page_url.slice(0, 1000), i.detail, i.evidence?.slice(0, 1000) || null]);
+      await pool.query('INSERT INTO scan_issues (scan_id, site_id, type, severity, page_url, detail, evidence, fingerprint, is_new) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [scanId, site.id, i.type, i.severity, i.page_url.slice(0, 1000), i.detail, i.evidence?.slice(0, 1000) || null, i.fingerprint, i.is_new]);
     }
+    // "Fixed" issues that are still there come back as open.
+    for (const fp of reopened) await setIssueStatus(site.id, fp, 'open');
+    const open = issues.filter((i) => !i.ignored);
+    const fresh = open.filter((i) => i.is_new);
     await pool.query('UPDATE scans SET progress = NULL, finished_at = ?, pages_checked = ?, links_checked = ?, issue_count = ?, ai_used = ?, summary = ? WHERE id = ?',
-      [toSql(new Date()), result.pages.length, result.linksChecked, issues.length, result.aiUsed ? 1 : 0, result.summary, scanId]);
+      [toSql(new Date()), result.pages.length, result.linksChecked, open.length, result.aiUsed ? 1 : 0, result.summary, scanId]);
     await pool.query('UPDATE sites SET last_scan_at = ? WHERE id = ?', [toSql(startedAt), site.id]);
 
-    if (issues.length) {
+    // Alert only about NEW problems; issues the team already knows about are just counted.
+    if (fresh.length) {
       const order = { high: 0, medium: 1, low: 2 };
-      const top = [...issues].sort((a, b) => order[a.severity] - order[b.severity]).slice(0, 10);
-      const lines = top.map((i) => `• [${i.severity}] ${i.detail}\n  ${i.page_url}${i.evidence && (i.type === 'broken_link' || i.type === 'broken_image') ? `\n  → ${i.evidence}` : ''}`);
+      const top = [...fresh].sort((a, b) => order[a.severity] - order[b.severity]).slice(0, 10);
+      const lines = top.map((i) => `• [${i.severity}]${i.reopened ? ' (came back)' : ''} ${i.detail}\n  ${i.page_url}${i.evidence && (i.type === 'broken_link' || i.type === 'broken_image') ? `\n  → ${i.evidence}` : ''}`);
+      const known = open.length - fresh.length;
       await raiseAlert(site, {
         kind: 'scan', dedupeKey: `scan:${scanId}`, includeClient: false,
-        subject: `🧹 ${site.name}: ${issues.length} website issue(s) found`,
-        message: `${result.summary}\n\n${lines.join('\n')}${issues.length > 10 ? `\n…and ${issues.length - 10} more.` : ''}\n\nFull list: ${process.env.APP_URL || ''}/#site-${site.id}`
+        subject: `🧹 ${site.name}: ${fresh.length} new website issue(s)`,
+        message: `${fresh.length} new issue(s) since the last scan${known ? `, ${known} already known and still open` : ''}.\n\n${lines.join('\n')}${fresh.length > 10 ? `\n…and ${fresh.length - 10} more.` : ''}\n\nFull list: ${process.env.APP_URL || ''}/#site-${site.id}`
       });
     }
-    return { scanId, pages: result.pages.length, linksChecked: result.linksChecked, issues: issues.length, summary: result.summary, aiUsed: result.aiUsed };
+    return { scanId, pages: result.pages.length, linksChecked: result.linksChecked, issues: open.length, newIssues: fresh.length, summary: result.summary, aiUsed: result.aiUsed };
   } catch (error) {
     await pool.query('UPDATE scans SET finished_at = ?, error = ? WHERE id = ?', [toSql(new Date()), String(error.message).slice(0, 500), scanId]);
     throw error;

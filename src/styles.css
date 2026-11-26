@@ -52,6 +52,24 @@ button.link { border: 0; background: none; color: var(--brand); padding: 0; marg
 .form .actions { margin-top: 14px; }
 .error { color: var(--bad); }
 .notice { background: color-mix(in srgb, var(--brand) 10%, transparent); padding: 8px 12px; border-radius: 7px; }
+.brand.plain { background: none; border: 0; color: #fff; padding: 0; font-size: 20px; font-weight: 700; cursor: pointer; }
+.header-btn { background: transparent; color: #fff; border-color: rgba(255,255,255,.45); }
+header .actions { align-items: center; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 12px; }
+.tab { font-size: 13px; padding: 5px 11px; border-radius: 99px; }
+.tab.active { background: var(--brand); color: #fff; border-color: var(--brand); }
+.pill.new { background: #ede9fe; color: #5b21b6; margin-left: 4px; font-weight: 600; }
+button.small, .small button { font-size: 12px; padding: 4px 9px; }
+.row-actions { white-space: nowrap; }
+.row-actions button + button { margin-left: 4px; }
+.code-row { display: flex; gap: 8px; align-items: center; margin: 6px 0 8px; }
+.code-row code, .card code { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; word-break: break-all; }
+.code-row code { flex: 1; }
+input[type=number] { width: 80px; font: inherit; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.inline-form { align-items: center; }
+.color-row { display: flex; gap: 8px; }
+.color-row input[type=color] { width: 44px; height: 38px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
+.color-row input:not([type=color]) { flex: 1; }
 .warn-box { background: color-mix(in srgb, var(--warn) 14%, transparent); }
 .notice .link { margin: 0 0 0 8px; }
 .progress { display: flex; flex-direction: column; gap: 4px; }
