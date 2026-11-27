@@ -1,7 +1,7 @@
 import mysql from 'mysql2/promise';
 import 'dotenv/config';
 
-const dbName = (process.env.MYSQL_DATABASE || 'siteguard').replace(/[^a-zA-Z0-9_]/g, '');
+const dbName = (process.env.MYSQL_DATABASE || 'siteguard').replace(/[^a-zA-Z0-9_$-]/g, ''); // hosting names like u123_siteguard or site-db
 const connection = {
   host: process.env.MYSQL_HOST || '127.0.0.1',
   port: Number(process.env.MYSQL_PORT || 3306),
@@ -122,9 +122,14 @@ async function addColumns(table, columns) {
 }
 
 export async function initializeDatabase() {
-  const conn = await mysql.createConnection(connection);
-  await conn.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-  await conn.end();
+  // On a hosting panel (cPanel, Hostinger, Plesk...) the database, user and password are made in
+  // the panel, and the user is not allowed to create databases. Then just use the one given.
+  try {
+    const conn = await mysql.createConnection(connection);
+    try { await conn.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`); } finally { await conn.end(); }
+  } catch (error) {
+    if (!/denied/i.test(error.message)) throw error;
+  }
   // Some MySQL installs (e.g. XAMPP, MySQL 5.7) default to MyISAM, which ignores foreign keys and
   // transactions. Force InnoDB on create, and convert tables created earlier.
   for (const sql of TABLES) await pool.query(`${sql} ENGINE=InnoDB`);
