@@ -134,11 +134,11 @@ app.get('/api/sites/:id', wrap(async (req, res) => {
   const [alerts] = await pool.query('SELECT kind, subject, channels, created_at FROM alerts WHERE site_id = ? ORDER BY id DESC LIMIT 20', [site.id]);
   const [[scan]] = await pool.query('SELECT * FROM scans WHERE site_id = ? ORDER BY id DESC LIMIT 1', [site.id]);
   // Show issues from the latest successful scan (a scan that failed or is running has none yet).
-  const [[lastGood]] = await pool.query('SELECT id FROM scans WHERE site_id = ? AND finished_at IS NOT NULL AND error IS NULL ORDER BY id DESC LIMIT 1', [site.id]);
+  const [[lastGood]] = await pool.query('SELECT id, started_at, summary FROM scans WHERE site_id = ? AND finished_at IS NOT NULL AND error IS NULL ORDER BY id DESC LIMIT 1', [site.id]);
   const [issues] = lastGood ? await pool.query(`SELECT si.*, st.status FROM scan_issues si
       LEFT JOIN issue_status st ON st.site_id = si.site_id AND st.fingerprint = si.fingerprint
       WHERE si.scan_id = ? ORDER BY si.is_new DESC, FIELD(si.severity, "high", "medium", "low"), si.type`, [lastGood.id]) : [[]];
-  res.json({ site, checks: checks.reverse(), incidents, alerts, scan: scan || null, issues });
+  res.json({ site, checks: checks.reverse(), incidents, alerts, scan: scan || null, lastGoodScan: lastGood || null, issues });
 }));
 
 app.post('/api/sites/:id/check', wrap(async (req, res) => {

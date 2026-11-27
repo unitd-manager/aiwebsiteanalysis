@@ -119,7 +119,8 @@ function SiteDetail({ id, onBack, onChanged }) {
   const [, tickClock] = useState(0);
   useEffect(() => { if (!scanActive) return; const t = setInterval(() => tickClock((n) => n + 1), 1_000); return () => clearInterval(t); }, [scanActive]);
   if (!data) return <p className="muted">Loading…</p>;
-  const { site, checks, incidents, alerts, scan, issues } = data;
+  const { site, checks, incidents, alerts, scan, lastGoodScan, issues } = data;
+  const olderResults = scan?.error && lastGoodScan && lastGoodScan.id !== scan.id;
   const scanRunning = scan && !scan.finished_at;
 
   async function act(kind) {
@@ -175,7 +176,10 @@ function SiteDetail({ id, onBack, onChanged }) {
             <div className="muted small">Running for {elapsed(scan.started_at)} · usually takes 2–6 minutes · results appear here automatically</div>
           </div>
         )}
-        {scan?.error && <p className="error">Scan failed: {scan.error}</p>}
+        {scan?.error && (/^Site was unreachable/.test(scan.error)
+          ? <p className="notice warn">{scan.error}</p>
+          : <p className="error">Scan failed: {scan.error}</p>)}
+        {olderResults && <p className="muted">Results below are from the last good scan · {fmtTime(lastGoodScan.started_at)}{lastGoodScan.summary ? `: ${lastGoodScan.summary}` : ''}</p>}
         {scan?.summary && scan.finished_at && !scan.error && <p>{scan.summary}</p>}
         <IssueTable siteId={id} issues={issues} onChanged={load} />
       </div>

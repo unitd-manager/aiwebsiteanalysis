@@ -332,6 +332,21 @@ export const scanGraph = new StateGraph(ScanState)
 
 const running = new Set();
 
+/**
+ * When the site itself was down or very slow during the scan, most pages fail to load and the
+ * results are mostly noise. Returns a message explaining that (the scan is then kept as failed,
+ * so the dashboard and reports keep the last good results), or null for a normal scan.
+ * HTTP errors such as 404 are real findings and do not count, only pages that gave no response.
+ */
+export function unreachableReason(issues, pagesLoaded) {
+  const fails = issues.filter((i) => i.type === 'page_error' && /^Page could not load/.test(i.detail));
+  const total = pagesLoaded + fails.length;
+  const down = (pagesLoaded === 0 && fails.length > 0) || (fails.length >= 5 && fails.length * 4 >= total);
+  if (!down) return null;
+  const cause = fails[0].detail.replace(/^Page could not load:\s*/, '');
+  return `Site was unreachable during the scan: ${fails.length} of ${total} pages did not respond (${cause}). Showing the last good scan instead. Run the scan again when the site is back.`.slice(0, 500);
+}
+
 export async function runSiteScan(site) {
   if (running.has(site.id)) return { alreadyRunning: true };
   running.add(site.id);
@@ -341,6 +356,14 @@ export async function runSiteScan(site) {
   try {
     const result = await scanGraph.invoke({ site, now: startedAt.toISOString(), scanId });
     lastProgress.delete(scanId);
+    const down = unreachableReason(result.issues, result.pages.length);
+    if (down) {
+      // Don't replace good results with noise from an outage; the uptime monitor alerts about the downtime.
+      await pool.query('UPDATE scans SET progress = NULL, finished_at = ?, pages_checked = ?, links_checked = ?, error = ? WHERE id = ?',
+        [toSql(new Date()), result.pages.length, result.linksChecked, down, scanId]);
+      await pool.query('UPDATE sites SET last_scan_at = ? WHERE id = ?', [toSql(startedAt), site.id]);
+      return { scanId, unreachable: true, error: down };
+    }
     const memory = await loadIssueMemory(site.id);
     const { issues, reopened } = classifyIssues(dedupeIssues(result.issues), memory.prevFingerprints, memory.statuses);
     for (const i of issues) {

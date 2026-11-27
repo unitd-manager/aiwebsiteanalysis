@@ -146,3 +146,15 @@ test('broken links record their text, where they sit, and every page they are on
   assert.equal(merged[1].detail, 'Broken link (HTTP 404) (on 2 pages)');
   assert.equal(merged[1].link_text, 'Gone');
 });
+
+test('a scan during an outage is marked unreachable; 404s and a few timeouts are not', async () => {
+  const { unreachableReason } = await import('../server/scanAgent.js');
+  const timeout = (n) => Array.from({ length: n }, (_, i) => ({ type: 'page_error', page_url: `https://x.test/${i}`, detail: 'Page could not load: No response within 20s' }));
+  assert.match(unreachableReason(timeout(1), 0), /^Site was unreachable.*1 of 1 pages.*No response within 20s/);
+  assert.match(unreachableReason(timeout(43), 42), /43 of 85 pages/);
+  assert.equal(unreachableReason(timeout(2), 40), null);
+  assert.equal(unreachableReason(timeout(5), 40), null);
+  const notFound = Array.from({ length: 30 }, () => ({ type: 'page_error', page_url: 'https://x.test/a', detail: 'Page returns HTTP 404' }));
+  assert.equal(unreachableReason(notFound, 10), null);
+  assert.equal(unreachableReason([], 0), null);
+});

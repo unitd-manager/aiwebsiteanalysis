@@ -52,6 +52,7 @@ button.link { border: 0; background: none; color: var(--brand); padding: 0; marg
 .form .actions { margin-top: 14px; }
 .error { color: var(--bad); }
 .notice { background: color-mix(in srgb, var(--brand) 10%, transparent); padding: 8px 12px; border-radius: 7px; }
+.notice.warn { background: color-mix(in srgb, #d97706 14%, transparent); color: inherit; }
 .brand.plain { background: none; border: 0; color: #fff; padding: 0; font-size: 20px; font-weight: 700; cursor: pointer; }
 .header-btn { background: transparent; color: #fff; border-color: rgba(255,255,255,.45); }
 header .actions { align-items: center; }
